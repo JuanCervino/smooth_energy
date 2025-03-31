@@ -1,7 +1,7 @@
 import numpy as np
 import torch
-from sklearn.metrics import pairwise_distances
-import cvxpy as cp
+# from sklearn.metrics import pairwise_distances
+# import cvxpy as cp
 
 #  From https://github.com/tegusi/RGCNN
 
@@ -230,7 +230,7 @@ def get_laplacian(imgs, normalize = False, heat_kernel_t = 10, clamp_value=None,
     """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    if distance_type not in ['euclidean', 'energy']:
+    if distance_type not in ['euclidean', 'energy','momentum_pendulum']:
         raise ValueError('distance_type should be euclidean or energy')
     
     
