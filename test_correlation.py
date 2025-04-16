@@ -12,10 +12,12 @@ def plot_matrix(matrix, title="Data Visualization"):
     plt.title(title)
     pass
 
-# dataset = load_dataset("NathanGavenski/Walker2d-v4")
-# dataset = load_dataset("NathanGavenski/Hopper-v4")
-dataset = load_dataset("NathanGavenski/InvertedPendulum-v4")
-train_dataset = dataset['train']
+train_dataset = np.load("smooth_energy/data/inverted_pendulum_dataset.npz")
+
+print("Loaded observations shape:", obs.shape)
+
+
+
 obs_tensor = torch.tensor(train_dataset['obs'], dtype=torch.float32)
 # act_tensor = torch.tensor(train_dataset['actions'], dtype=torch.float32)
 act_tensor = torch.tensor(train_dataset['actions'], dtype=torch.float32).unsqueeze(1)

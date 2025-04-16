@@ -1,5 +1,8 @@
 import numpy as np
 import torch
+
+from torch_sparse import SparseTensor
+
 # from sklearn.metrics import pairwise_distances
 # import cvxpy as cp
 
@@ -333,3 +336,178 @@ def projsplx(tensor):
     vals = torch.nn.functional.relu(vals - that)
     vals = vals/torch.sum(vals).item()
     return vals[np.argsort(hk1)]
+
+
+# def get_knn_matrix(tensor, distance_type = 'euclidean', matrix_type = 'knn', k=10):
+
+#     if distance_type == 'euclidean':
+#         flat = tensor.flatten(start_dim = 1)
+#         adj_matrix = torch.cdist(flat,flat)
+        
+
+#     if matrix_type == 'knn':
+#         assert isinstance(k, int), "k must be an integer"
+#         rows, cols, weights = [], [], []
+
+#         for i in range(adj_matrix.size(0)):
+#             dists = adj_matrix[i].clone()
+#             dists[i] = float('inf')  # Prevent self-loop
+#             topk = torch.topk(-dists, k, largest=True)  # Negative for smallest distances
+#             neighbors = topk.indices
+#             weights_i = -topk.values
+
+#             rows.append(torch.full((k,), i))
+#             cols.append(neighbors)
+#             weights.append(weights_i)
+
+#         edge_index = torch.stack([torch.cat(rows), torch.cat(cols)], dim=0)
+#         edge_weight = torch.cat(weights)
+
+#         adj_t = SparseTensor(row=edge_index[0], col=edge_index[1], value=edge_weight, sparse_sizes=(adj_matrix.size(0), adj_matrix.size(0)))
+#         return adj_t
+
+# def get_knn_matrix(tensor, distance_type='euclidean', matrix_type='knn', k=10, batch_size=10):
+#     assert matrix_type == 'knn', "Only 'knn' matrix_type is supported in this implementation."
+#     assert distance_type == 'euclidean', "Only 'euclidean' distance_type is supported in this implementation."
+
+#     flat = tensor.flatten(start_dim=1)
+#     n_samples = flat.size(0)
+
+#     rows, cols, weights = [], [], []
+
+#     for start in range(0, n_samples, batch_size):
+#         end = min(start + batch_size, n_samples)
+#         batch = flat[start:end]  # Shape: (B, D)
+
+#         # Compute pairwise distance between batch and all data
+#         dists = torch.cdist(batch, flat)  # Shape: (B, N)
+#         for i in range(end - start):
+#             row_idx = start + i
+#             dists_i = dists[i]
+#             dists_i[row_idx] = float('inf')  # Avoid self-loop
+
+#             topk = torch.topk(-dists_i, k, largest=True)
+#             neighbors = topk.indices
+#             weights_i = -topk.values
+
+#             rows.append(torch.full((k,), row_idx, dtype=torch.long))
+#             cols.append(neighbors)
+#             weights.append(weights_i)
+
+#     edge_index = torch.stack([torch.cat(rows), torch.cat(cols)], dim=0)
+#     edge_weight = torch.cat(weights)
+
+#     adj_t = SparseTensor(
+#         row=edge_index[0],
+#         col=edge_index[1],
+#         value=edge_weight,
+#         sparse_sizes=(n_samples, n_samples)
+#     )
+
+#     return adj_t
+
+def get_knn_matrix(tensor, distance_type='euclidean', matrix_type='knn', k=10, batch_size=10):
+    assert matrix_type == 'knn', "Only 'knn' matrix_type is supported in this implementation."
+    assert distance_type == 'euclidean', "Only 'euclidean' distance_type is supported in this implementation."
+
+    device = tensor.device  # get device
+    flat = tensor.flatten(start_dim=1)
+    n_samples = flat.size(0)
+
+    rows, cols, weights = [], [], []
+
+    for start in range(0, n_samples, batch_size):
+        end = min(start + batch_size, n_samples)
+        batch = flat[start:end]  # Shape: (B, D)
+
+        dists = torch.cdist(batch, flat)  # Shape: (B, N)
+        for i in range(end - start):
+            row_idx = start + i
+            dists_i = dists[i]
+            dists_i[row_idx] = float('inf')  # Avoid self-loop
+
+            topk = torch.topk(-dists_i, k, largest=True)
+            neighbors = topk.indices
+            weights_i = -topk.values
+
+            rows.append(torch.full((k,), row_idx, dtype=torch.long, device=device))  # ensure correct device
+            cols.append(neighbors.to(device))  # ensure correct device
+            weights.append(weights_i.to(device))  # ensure correct device
+
+    edge_index = torch.stack([torch.cat(rows), torch.cat(cols)], dim=0)
+    edge_weight = torch.cat(weights)
+
+    adj_t = SparseTensor(
+        row=edge_index[0],
+        col=edge_index[1],
+        value=edge_weight,
+        sparse_sizes=(n_samples, n_samples)
+    )
+
+    return adj_t
+
+
+# def get_knn_matrix_efficient(tensor, distance_type='euclidean', matrix_type='knn', k=10, batch_size=512):
+#     assert matrix_type == 'knn', "Only 'knn' matrix_type is supported in this implementation."
+#     assert distance_type == 'euclidean', "Only 'euclidean' distance_type is supported in this implementation."
+
+#     flat = tensor.flatten(start_dim=1)
+#     N = flat.size(0)
+
+#     # Store neighbors for each node
+#     knn_indices = [[] for _ in range(N)]
+#     knn_dists = [[] for _ in range(N)]
+
+#     for i_start in range(0, N, batch_size):
+#         i_end = min(i_start + batch_size, N)
+#         x_i = flat[i_start:i_end]
+
+#         for j_start in range(i_start, N, batch_size):
+#             j_end = min(j_start + batch_size, N)
+#             x_j = flat[j_start:j_end]
+
+#             # Compute distance between x_i and x_j
+#             dists = torch.cdist(x_i, x_j)  # Shape: (i_end - i_start, j_end - j_start)
+
+#             for i in range(i_end - i_start):
+#                 for j in range(j_end - j_start):
+#                     global_i = i_start + i
+#                     global_j = j_start + j
+
+#                     if global_i == global_j:
+#                         continue
+
+#                     # Add distance to both (i, j) and (j, i) since symmetric
+#                     knn_indices[global_i].append(global_j)
+#                     knn_dists[global_i].append(dists[i, j])
+
+#                     knn_indices[global_j].append(global_i)
+#                     knn_dists[global_j].append(dists[i, j])
+
+#     # Now select top-k neighbors for each node
+#     rows, cols, weights = [], [], []
+
+#     for i in range(N):
+#         if len(knn_dists[i]) < k:
+#             # Handle edge case: fewer than k neighbors
+#             dists_i = torch.tensor(knn_dists[i])
+#             neighbors_i = torch.tensor(knn_indices[i], dtype=torch.long)
+#         else:
+#             dists_i, indices = torch.topk(torch.tensor(knn_dists[i]), k=k, largest=False)
+#             neighbors_i = torch.tensor(knn_indices[i], dtype=torch.long)[indices]
+
+#         rows.append(torch.full((neighbors_i.size(0),), i, dtype=torch.long))
+#         cols.append(neighbors_i)
+#         weights.append(dists_i)
+
+#     edge_index = torch.stack([torch.cat(rows), torch.cat(cols)], dim=0)
+#     edge_weight = torch.cat(weights)
+
+#     adj_t = SparseTensor(
+#         row=edge_index[0],
+#         col=edge_index[1],
+#         value=edge_weight,
+#         sparse_sizes=(N, N)
+#     )
+
+#     return adj_t

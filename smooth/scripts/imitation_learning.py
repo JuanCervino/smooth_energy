@@ -11,6 +11,13 @@ import torch.optim as optim
 import torch.nn.functional as F
 import json
 from smooth import laplacian
+from torch_sparse import SparseTensor
+import time # Delete this
+
+
+# TODO: move this datasets out of here
+# TODO: add the threshold for the laplacian
+# TODO: Add transformer architecture
 
 class RegressionDataset(Dataset):
 
@@ -24,6 +31,85 @@ class RegressionDataset(Dataset):
     def __getitem__(self, idx):
         return self.X[idx,:], self.y[idx,:]
 
+class SparseCOODataset(Dataset):
+    def __init__(self, sparse_tensor: SparseTensor):
+        self.row, self.col, self.val = sparse_tensor.coo()
+        self.length = self.row.size(0)
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        return self.row[idx], self.col[idx], self.val[idx]
+
+
+def infinite_dataloader(dataloader):
+    """Creates an infinite generator from a DataLoader"""
+    while True:
+        for batch in dataloader:
+            yield batch
+            
+# def collate_fn(batch):
+#     rows, cols, vals = zip(*batch)
+#     return torch.stack(rows), torch.stack(cols), torch.stack(vals)
+
+# def collate_fn(batch):
+#     r, c, v, x_r, x_c = zip(*batch)
+#     return (torch.stack(r),
+#             torch.stack(c),
+#             torch.stack(v),
+#             torch.stack(x_r),
+#             torch.stack(x_c))
+
+
+class NodeNeighborhoodDataset(Dataset):
+    def __init__(self, sparse_tensor, X):
+        self.row, self.col, self.val = sparse_tensor.coo()
+        self.X = X  # (num_nodes, feat_dim)
+
+        # Preprocess: for each node, store indices where it's a row
+        self.num_nodes = X.size(0)
+        self.row_to_edge_indices = [[] for _ in range(self.num_nodes)]
+        for idx in range(self.row.size(0)):
+            n = self.row[idx].item()
+            self.row_to_edge_indices[n].append(idx)
+
+        # Filter to nodes that actually have outgoing edges
+        self.valid_nodes = [i for i, e in enumerate(self.row_to_edge_indices) if len(e) > 0]
+
+    def __len__(self):
+        return len(self.valid_nodes)
+
+    def __getitem__(self, idx):
+        node = self.valid_nodes[idx]
+        edge_indices = self.row_to_edge_indices[node]
+
+        rows = self.row[edge_indices]           # Should all be node
+        cols = self.col[edge_indices]
+        vals = self.val[edge_indices]
+        x_row = self.X[rows]                    # Repeated node features
+        x_col = self.X[cols]                    # Neighbor features
+
+        return rows, cols, vals, x_row, x_col
+
+def laplacian_quad_batch_from_features(f, x_row, x_col, val_batch):
+    fx_row = f(x_row)  # shape: (batch_size, feat_dim)
+    fx_col = f(x_col)  # shape: (batch_size, feat_dim)
+    diff = fx_col - fx_row
+    quad = (diff**2).sum(dim=-1) * val_batch  # (batch_size,)
+    return quad.sum()
+
+def collate_fn(batch):
+    # Each item in batch is (rows, cols, vals, x_row, x_col) of varying length
+    rows, cols, vals, x_rows, x_cols = zip(*batch)
+
+    return (
+        torch.cat(rows),
+        torch.cat(cols),
+        torch.cat(vals),
+        torch.cat(x_rows),
+        torch.cat(x_cols)
+    )
 
 @torch.no_grad()
 def accuracy(net, loader, device):
@@ -139,6 +225,47 @@ def main(args):
                         loss = F.mse_loss(f, labels)
                         loss_MSE = loss.item()
                         loss += args.regularizer * torch.trace(torch.matmul(f_unlabel.transpose(0,1),torch.matmul(L, f_unlabel)))
+                        loss.backward()
+                        optimizer.step()
+                        # print(loss.item(),loss_MSE.item(),(loss-loss_MSE).item())
+                    
+                    if (epoch+1) % args.print_steps ==0:
+                        with torch.no_grad():
+                            loss_test = mse_metric(net,test_loader,device)
+                            loss_train = mse_metric(net,train_loader,device)
+                        utils.save_state(args.output_dir,epoch,loss_train,loss_train-loss_MSE,loss_MSE,loss_test)
+                        print(f'Epoch {epoch}, loss {loss.item()}, loss diff {loss.item()-loss_MSE}, loss train {loss_train}, loss test {loss_test}')                        
+                
+    elif args.algorithm == 'LaplacianRegularizationEuclideanSparse':
+        columns = ['Epoch', 'Loss','Regularized Laplacian Loss', 'Laplacian Loss', 'Accuracy']
+        utils.create_csv(args.output_dir, 'losses.csv', columns)
+        X_total = torch.concatenate((X_train, X_test), axis=0)
+        print('Ready to compute Laplacian')
+        start_time = time.time()
+        matrix = laplacian.get_knn_matrix(X_total,  distance_type = 'euclidean', matrix_type = 'knn', k=args.k, batch_size=200)
+        end_time = time.time()
+        time_normal = end_time - start_time
+        print('Time Normal', time_normal)
+
+        dataset = NodeNeighborhoodDataset(matrix, X_total)
+        
+        # The batch size is k * batch_size
+        loader = DataLoader(dataset, batch_size=args.bs//args.k, shuffle=True, collate_fn=collate_fn)
+        unlabeled_loader = infinite_dataloader(loader)
+
+        for epoch in range(args.epochs):
+                    for i, data in enumerate(train_loader):
+                        inputs, labels = data
+                        optimizer.zero_grad()
+                        f = net(inputs)
+
+                        loss = F.mse_loss(f, labels)
+                        loss_MSE = loss.item()
+                        # row_batch, col_batch, val_batch = next(unlabeled_loader)
+                        row_batch, col_batch, val_batch, x_row, x_col = next(unlabeled_loader)
+                        
+                        loss += args.regularizer * laplacian_quad_batch_from_features(net, x_row, x_col, val_batch)
+
                         loss.backward()
                         optimizer.step()
                         # print(loss.item(),loss_MSE.item(),(loss-loss_MSE).item())
@@ -324,6 +451,7 @@ if __name__ == '__main__':
     parser.add_argument('--rho_step', type=float, default=0.1)
     parser.add_argument('--epsilon', type=float, default=0.01)
     parser.add_argument('--clamp', type=float, default=0.1)
+    parser.add_argument('--k', type=int, default=10)
 
     args = parser.parse_args()
 
