@@ -138,7 +138,7 @@ def mse_metric(net, loader, device):
     return total_mse / total_samples
 
 class FCNN3(nn.Module):
-    def __init__(self, input_dim = 4, hidden_dim = 64, num_classes = 1):
+    def __init__(self, input_dim = 4, hidden_dim = 32, num_classes = 1):
         super(FCNN3, self).__init__()
 
         self.layer1 = nn.Linear(in_features=input_dim,out_features=hidden_dim,bias=True)
@@ -146,11 +146,11 @@ class FCNN3(nn.Module):
         self.layer3 = nn.Linear(in_features=hidden_dim,out_features=num_classes,bias=False)
 
     def forward(self, x):
-        # out = F.relu(self.layer1(x))
         x = torch.relu(self.layer1(x))
         x = torch.relu(self.layer2(x))
         out = self.layer3(x)
         return out
+
 
 def main(args):
 
@@ -418,6 +418,78 @@ def main(args):
                 
                     print(f'Epoch loss{epoch,loss.item()}, mu={mu_dual.item()}, {loss.item()-loss_MSE}, loss train {loss_train}, loss test {acc}' )
               
+
+    elif args.algorithm == 'ManifoldGradientBatch':
+
+            columns = ['Epoch', 'Loss CE','Regularized Laplacian Loss', 'Laplacian Loss', 'Accuracy']
+            utils.create_csv(args.output_dir, 'losses.csv', columns)
+            X_total = torch.concatenate((X_train, X_test), axis=0)
+            adj_matrix = laplacian.get_pairwise_distance_matrix(X_total, t=args.heat_kernel_t, distance_type='euclidean').to(device)
+
+            # L = laplacian.get_laplacian(X_total, args.normalize, heat_kernel_t=args.heat_kernel_t, clamp_value = args.clamp).to(device)
+            matrix = laplacian.get_knn_matrix(X_total,  distance_type = 'euclidean', matrix_type = 'knn', k=args.k, batch_size=200)
+
+            lambda_dual = torch.ones(len(X_total[:,0])) / len(X_total[:,0])  # Initialize dual variables for each sample in the dataset
+            lambda_dual = lambda_dual.to(device).detach().requires_grad_(False)
+            mu_dual = 5*torch.ones(1).to(device).detach().requires_grad_(False)
+            dataset = NodeNeighborhoodDataset(matrix, X_total)
+            # The batch size is k * batch_size
+            unlabeled_loader_finite = DataLoader(dataset, batch_size=args.bs//args.k, shuffle=True, collate_fn=collate_fn)
+            unlabeled_loader_infinite = infinite_dataloader(unlabeled_loader_finite)
+            for epoch in range(args.epochs):
+                # print(epoch)
+                ############################################
+                # Primal Update
+                ############################################
+                for i, data in enumerate(train_loader):
+                        inputs, labels = data
+                        optimizer.zero_grad()
+                        f = net(inputs)
+
+                        loss = F.mse_loss(f, labels)
+                        loss_MSE = loss.item()
+                        # TODO: Sample According to lambda
+                        row_batch, col_batch, val_batch, x_row, x_col = next(unlabeled_loader_infinite)
+
+                        val_batch = val_batch * lambda_dual[row_batch].to(device)  # Apply dual variable to the values
+                        loss += args.regularizer * laplacian_quad_batch_from_features(net, x_row, x_col, val_batch)
+
+                        loss.backward()
+                        optimizer.step()
+                            # print(loss.item(),loss_MSE.item(),(loss-loss_MSE).item())
+                ############################################
+                # Dual Update
+                ############################################
+                if (epoch+1) % args.dual_update_steps ==0 :
+
+                    with torch.no_grad():
+                        for row_batch, col_batch, val_batch, x_row, x_col in unlabeled_loader_finite:
+                            fx_row = net(x_row)  # shape: (batch_size, feat_dim)
+                            fx_col = net(x_col)  # shape: (batch_size, feat_dim)
+                            numerator = torch.abs (fx_row  - fx_col).to(device).squeeze(1)  # (batch_size, feat_dim)
+                            
+                            division = torch.div(numerator, val_batch)
+                            # Find unique keys and mapping
+                            unique_rows, inverse_indices = torch.unique(row_batch, return_inverse=True)
+
+                            # Initialize a tensor to hold maximums
+                            max_values = torch.full((unique_rows.size(0),), float('-inf'))
+
+                            # Scatter maximum
+                            max_values = max_values.scatter_reduce(0, inverse_indices, division, reduce="amax", include_self=True)
+
+                            lambda_dual[unique_rows] = F.relu(lambda_dual[unique_rows] + args.dual_step_mu*(max_values-args.lipschitz_constant))
+                    # TODO: Normalize lambda_dual
+                if (epoch+1) % args.print_steps ==0 :
+                    with torch.no_grad():
+                        acc = mse_metric(net,test_loader,device)
+                        loss_train = mse_metric(net,train_loader,device)
+                    utils.save_state(args.output_dir,epoch,loss_train,loss_train-loss_MSE,loss_MSE,acc)
+                
+                    print(f'Epoch loss{epoch,loss.item()}, max lambda={torch.max(lambda_dual)}, positive lambdas={ (lambda_dual > 0).sum()}, {loss.item()-loss_MSE}, loss train {loss_train}, loss test {acc}' )
+       
+
+              
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Manifold Regularization with Synthetic Data')
@@ -441,7 +513,7 @@ if __name__ == '__main__':
     parser.add_argument('--heat_kernel_t', type=float, default=1e-2)
     parser.add_argument('--normalize', type=bool, default=True)
 
-    parser.add_argument('--hidden_neurons', type=int, default=64)
+    parser.add_argument('--hidden_neurons', type=int, default=32)
     parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--momentum', type=float, default=0.)
     parser.add_argument('--weight_decay', type=float, default=0.)
@@ -451,6 +523,8 @@ if __name__ == '__main__':
     parser.add_argument('--rho_step', type=float, default=0.1)
     parser.add_argument('--epsilon', type=float, default=0.01)
     parser.add_argument('--clamp', type=float, default=0.1)
+    parser.add_argument('--lipschitz_constant', type=float, default=1)
+
     parser.add_argument('--k', type=int, default=10)
 
     args = parser.parse_args()
