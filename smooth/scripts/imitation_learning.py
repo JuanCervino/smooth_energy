@@ -13,12 +13,36 @@ import json
 from smooth import laplacian
 from torch_sparse import SparseTensor
 import time # Delete this
+import random
+import sys
 
-
-# TODO: move this datasets out of here
+# TODO: move all this code out of here
 # TODO: add the threshold for the laplacian
-# TODO: Add transformer architecture
 
+
+
+def set_seed(seed):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        
+class Logger(object):
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "a")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+        
 class RegressionDataset(Dataset):
 
     def __init__(self, X, y):
@@ -60,6 +84,61 @@ def infinite_dataloader(dataloader):
 #             torch.stack(v),
 #             torch.stack(x_r),
 #             torch.stack(x_c))
+
+# def get_lipschitz_constant(net, X):
+#     """
+#     Computes the Lipschitz constant of the network using the spectral norm.
+#     Args:
+#         net (nn.Module): The neural network model.
+#         X (torch.Tensor): Input data to compute the Lipschitz constant.
+#     Returns:
+#         float: The Lipschitz constant of the network.
+#     """
+#     net.eval()  # Set the model to evaluation mode
+#     with torch.no_grad():
+#         X = X.to(next(net.parameters()).device)  # Ensure X is on the same device as the model
+#         output = net(X)
+#         # Compute the Jacobian matrix
+#         jacobian = torch.autograd.functional.jacobian(net, X)
+#         # Compute the spectral norm (largest singular value)
+#         lipschitz_constant = torch.linalg.svdvals(jacobian).max().item()
+#     return lipschitz_constant
+
+def get_lipschitz_constant(net, unlabeled_loader_finite):
+    """
+    Computes the Lipschitz constant of the network using the spectral norm.
+    Args:
+        net (nn.Module): The neural network model.
+        X (torch.Tensor): Input data to compute the Lipschitz constant.
+    Returns:
+        float: The Lipschitz constant of the network.
+    """
+    lipschitz_constant = 0.0
+    net.eval()  # Set the model to evaluation mode
+    with torch.no_grad():
+        for row_batch, col_batch, val_batch, x_row, x_col in unlabeled_loader_finite:
+            fx_row = net(x_row)  # shape: (batch_size, feat_dim)
+            fx_col = net(x_col)  # shape: (batch_size, feat_dim)
+            device = fx_row.device  # Get the device of the model
+            
+            # Ensure all tensors are on the same device
+            row_batch = row_batch.to(device)
+            col_batch = col_batch.to(device)
+            val_batch = val_batch.to(device)
+            
+            numerator = torch.abs (fx_row  - fx_col).squeeze(1)  # (batch_size, feat_dim)
+            division = torch.div(numerator, val_batch)
+            # Find unique keys and mapping
+            unique_rows, inverse_indices = torch.unique(row_batch, return_inverse=True)
+            unique_rows = unique_rows.to(device)  # Ensure it's on the same device
+            inverse_indices = inverse_indices.to(device)  # Ensure it's on the same device
+
+            # Initialize a tensor to hold maximums
+            max_values = torch.full((unique_rows.size(0),), float('-inf'), device=device)
+            max_values = max_values.scatter_reduce(0, inverse_indices, division, reduce="amax", include_self=True)
+            if max_values.max().item() > lipschitz_constant:
+                lipschitz_constant = max_values.max().item()
+    return lipschitz_constant
 
 
 class NodeNeighborhoodDataset(Dataset):
@@ -156,9 +235,18 @@ def main(args):
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f'Using device: {device}')
+    set_seed(args.seed)
+
     print('Loading dataset...')
     # Load dataset
-    data = imitation.create_imitation_dataset(args.dataset,
+    if args.sampling == 'trajectory':
+        data = imitation.create_imitation_dataset_trajectories(args.dataset,
+                                               n_train=args.n_train,
+                                               n_unlab=args.n_unlab,
+                                               n_test=args.n_test,
+                                               T=args.trajectory_length)
+    else:
+        data = imitation.create_imitation_dataset(args.dataset,
                                                ids_train=np.arange(args.n_train),
                                                ids_unlab=np.arange(args.n_train, args.n_train + args.n_unlab),
                                                ids_test=np.arange(args.n_train + args.n_unlab, args.n_train + args.n_unlab + args.n_test))
@@ -169,6 +257,23 @@ def main(args):
     test_dataset = RegressionDataset(X_test, Y_test)
     train_loader = DataLoader(train_dataset, batch_size=args.bs, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=args.bs)
+    
+    if X_unlab is not None:
+        X_total = torch.concatenate((X_train, X_unlab), axis=0)
+    else:
+        X_total = X_train
+    print('Ready to compute Laplacian of size', X_total.shape)
+    adj_matrix = laplacian.get_pairwise_distance_matrix(X_total, t=args.heat_kernel_t, distance_type='euclidean').to(device)
+        # L = laplacian.get_laplacian(X_total, args.normalize, heat_kernel_t=args.heat_kernel_t, clamp_value = args.clamp).to(device)
+    matrix = laplacian.get_knn_matrix(X_total,  distance_type = 'euclidean', matrix_type = 'knn', k=args.k, batch_size=200)
+
+    
+    dataset = NodeNeighborhoodDataset(matrix, X_total)
+    unlabeled_loader_finite = DataLoader(dataset, batch_size=args.bs//args.k, shuffle=True, collate_fn=collate_fn)
+
+    print('Completed Laplacian')
+
+
     print("Dataset loaded.")
     print(f"X_test shape: {X_test.shape}")
     print(f"Y_test shape: {Y_test.shape}")
@@ -423,19 +528,15 @@ def main(args):
 
             columns = ['Epoch', 'Loss CE','Regularized Laplacian Loss', 'Laplacian Loss', 'Accuracy']
             utils.create_csv(args.output_dir, 'losses.csv', columns)
-            X_total = torch.concatenate((X_train, X_test), axis=0)
-            adj_matrix = laplacian.get_pairwise_distance_matrix(X_total, t=args.heat_kernel_t, distance_type='euclidean').to(device)
-
-            # L = laplacian.get_laplacian(X_total, args.normalize, heat_kernel_t=args.heat_kernel_t, clamp_value = args.clamp).to(device)
-            matrix = laplacian.get_knn_matrix(X_total,  distance_type = 'euclidean', matrix_type = 'knn', k=args.k, batch_size=200)
-
+            
             lambda_dual = torch.ones(len(X_total[:,0])) / len(X_total[:,0])  # Initialize dual variables for each sample in the dataset
             lambda_dual = lambda_dual.to(device).detach().requires_grad_(False)
             mu_dual = 5*torch.ones(1).to(device).detach().requires_grad_(False)
-            dataset = NodeNeighborhoodDataset(matrix, X_total)
             # The batch size is k * batch_size
-            unlabeled_loader_finite = DataLoader(dataset, batch_size=args.bs//args.k, shuffle=True, collate_fn=collate_fn)
             unlabeled_loader_infinite = infinite_dataloader(unlabeled_loader_finite)
+            # dataset_size = len(X_total[:,0])
+            dataset_size = len(unlabeled_loader_finite.dataset)
+            
             for epoch in range(args.epochs):
                 # print(epoch)
                 ############################################
@@ -448,9 +549,18 @@ def main(args):
 
                         loss = F.mse_loss(f, labels)
                         loss_MSE = loss.item()
-                        # TODO: Sample According to lambda
-                        row_batch, col_batch, val_batch, x_row, x_col = next(unlabeled_loader_infinite)
 
+                        # Following samples uniformly from the unlabeled dataset
+                            # row_batch, col_batch, val_batch, x_row, x_col = next(unlabeled_loader_infinite)
+                        # Sample indices based on the dual variable
+                        probs = lambda_dual.cpu().numpy()
+                        probs = probs / probs.sum()
+                        samples = np.random.choice(np.arange(dataset_size), size=args.bs, replace=False, p=probs)
+                        # print('Samples', samples)
+                        samples = torch.tensor(samples, dtype=torch.long, device=device)
+                        batch = [unlabeled_loader_finite.dataset[idx] for idx in samples]
+                        row_batch, col_batch, val_batch, x_row, x_col = collate_fn(batch)
+                        
                         val_batch = val_batch * lambda_dual[row_batch].to(device)  # Apply dual variable to the values
                         loss += args.regularizer * laplacian_quad_batch_from_features(net, x_row, x_col, val_batch)
 
@@ -486,8 +596,21 @@ def main(args):
                         loss_train = mse_metric(net,train_loader,device)
                     utils.save_state(args.output_dir,epoch,loss_train,loss_train-loss_MSE,loss_MSE,acc)
                 
-                    print(f'Epoch loss{epoch,loss.item()}, max lambda={torch.max(lambda_dual)}, positive lambdas={ (lambda_dual > 0).sum()}, {loss.item()-loss_MSE}, loss train {loss_train}, loss test {acc}' )
+                    print(f'Epoch loss{epoch,loss.item()},\
+                            max lambda={torch.max(lambda_dual)}, \
+                            positive lambdas={ (lambda_dual > 0).sum()}, \
+                            loss train {loss_train}, \
+                            loss grad {loss.item()-loss_MSE}, \
+                            loss MSE {loss_MSE}, \
+                            loss test {acc}' )
        
+    # Save final model
+    lipschitz_constant = get_lipschitz_constant(net, unlabeled_loader_finite)  # Compute Lipschitz constant for logging
+    print(f'Lipschitz constant: {lipschitz_constant}')
+    print('Saving final model...')
+    model_path = os.path.join(args.output_dir, 'final_model.pth')
+    torch.save(net.state_dict(), model_path)
+    print(f'Model saved to {model_path}')
 
               
 if __name__ == '__main__':
@@ -498,14 +621,19 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str, default='inverted_pendulum')
     parser.add_argument('--n_dim', type=int, default=2, help='Dimension')
     parser.add_argument('--n_train', type=int, default=1)
-    parser.add_argument('--n_unlab', type=int, default=100, help='Number of samples per class')
+    parser.add_argument('--n_unlab', type=int, default=0, help='Number of samples per class')
     parser.add_argument('--n_test', type=int, default=10)
     parser.add_argument('--data_dir', type=str, default='./smooth/data')
     parser.add_argument('--bs', type=int, default=8)
-    parser.add_argument('--print_steps', type=int, default=500)
+    parser.add_argument('--trajectory_length', type=int, default=300, help='Length of the trajectory for the dataset')
+
+    parser.add_argument('--print_steps', type=int, default=250)
+    parser.add_argument('--sampling', type=str, default='trajectory', help='Sampling method for the dataset')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
 
 
     parser.add_argument('--algorithm', type=str, default='ERM')
+
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--dual_update_steps', type=int, default=100)
 
@@ -529,8 +657,14 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    args.output_dir = args.output_dir + '/' + str(args.dataset) +  '_' + args.algorithm+  '_'  + datetime.now().strftime("%Y-%m%d-%H%M%S")
+    args.output_dir = args.output_dir + '/' + str(args.dataset) +  '/' + args.algorithm+  '/'  + datetime.now().strftime("%Y-%m%d-%H%M%S")
     os.makedirs(os.path.join(args.output_dir), exist_ok=True)
+    
+    # Create logs directory and save logs
+    logs_dir = os.path.join(args.output_dir, 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+    log_file = os.path.join(logs_dir, 'log.txt')
+    sys.stdout = Logger(log_file)
 
     print('Args:')
     for k, v in sorted(vars(args).items()):
