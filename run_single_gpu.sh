@@ -13,5 +13,6 @@ nvcc --version
 nvidia-smi
 
 # Run experiment with the provided config
-echo "Received config file: $1"
-python -m smooth.scripts.imitation_learning --epochs 50000 --bs 32 --lr 0.025 --algorithm ERM  --n_train $1
+echo "Received config file:  $1 $2 $3 $4"
+python -m smooth.scripts.imitation_learning --epochs 50000 --bs 128 --lr 0.025 --algorithm ERM  --n_train $1
+# python -m smooth.scripts.imitation_learning --epochs 50000 --bs 128 --lr 0.025 --print_steps 1000 --algorithm ManifoldGradientBatch  --n_train $1 --lipschitz_constant $2 --clamp_dual $3 --dual_step $4  

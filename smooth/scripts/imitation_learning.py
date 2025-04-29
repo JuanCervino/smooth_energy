@@ -125,7 +125,8 @@ def get_lipschitz_constant(net, unlabeled_loader_finite):
             row_batch = row_batch.to(device)
             col_batch = col_batch.to(device)
             val_batch = val_batch.to(device)
-            
+            val_batch = torch.where(val_batch == 0, torch.tensor(1e-1, dtype=val_batch.dtype), val_batch)  # Avoid division by zero
+
             numerator = torch.abs (fx_row  - fx_col).squeeze(1)  # (batch_size, feat_dim)
             division = torch.div(numerator, val_batch)
             # Find unique keys and mapping
@@ -265,12 +266,11 @@ def main(args):
     print('Ready to compute Laplacian of size', X_total.shape)
     adj_matrix = laplacian.get_pairwise_distance_matrix(X_total, t=args.heat_kernel_t, distance_type='euclidean').to(device)
         # L = laplacian.get_laplacian(X_total, args.normalize, heat_kernel_t=args.heat_kernel_t, clamp_value = args.clamp).to(device)
-    matrix = laplacian.get_knn_matrix(X_total,  distance_type = 'euclidean', matrix_type = 'knn', k=args.k, batch_size=200)
+    matrix = laplacian.get_knn_matrix(X_total,  distance_type = 'euclidean', matrix_type = 'knn', k=args.k, batch_size=200).to(device)
 
     
     dataset = NodeNeighborhoodDataset(matrix, X_total)
     unlabeled_loader_finite = DataLoader(dataset, batch_size=args.bs//args.k, shuffle=True, collate_fn=collate_fn)
-
     print('Completed Laplacian')
 
 
@@ -414,115 +414,7 @@ def main(args):
                         print(f'Epoch {epoch}, loss {loss.item()}, loss diff {loss.item()-loss_MSE}, loss train {loss_train}, loss test {loss_test}')                        
             
 
-    elif args.algorithm == 'ManifoldGradient':
 
-            columns = ['Epoch', 'Loss CE','Regularized Laplacian Loss', 'Laplacian Loss', 'Accuracy']
-            utils.create_csv(args.output_dir, 'losses.csv', columns)
-            X_total = torch.concatenate((X_train, X_test), axis=0)
-            adj_matrix = laplacian.get_pairwise_distance_matrix(X_total, t=args.heat_kernel_t, distance_type='euclidean').to(device)
-
-            L = laplacian.get_laplacian(X_total, args.normalize, heat_kernel_t=args.heat_kernel_t, clamp_value = args.clamp).to(device)
-            e, V = np.linalg.eig(L.cpu().detach().numpy())
-            print('Connected Components', np.sum(e < 0.0001))
-            lambda_dual = torch.ones(len(X_total[:,0])) / len(X_total[:,0])  # Initialize dual variables for each sample in the dataset
-            lambda_dual = lambda_dual.to(device).detach().requires_grad_(False)
-            mu_dual = 5*torch.ones(1).to(device).detach().requires_grad_(False)
-            for epoch in range(args.epochs):
-                # print(epoch)
-                ############################################
-                # Primal Update
-                ############################################
-                for i, data in enumerate(train_loader):
-                    inputs, labels = data
-                    optimizer.zero_grad()
-                    f = net(inputs)
-                    f_all = net(X_total)
-
-                    loss = mu_dual * F.mse_loss(f, labels)
-                    loss_MSE = loss.item()
-                    loss += args.regularizer * torch.trace(torch.matmul(f_all.transpose(0,1),torch.matmul(L, f_all)))
-                    loss.backward()
-                    optimizer.step()
-                            # print(loss.item(),loss_MSE.item(),(loss-loss_MSE).item())
-                ############################################
-                # Dual Update
-                ############################################
-                if (epoch+1) % args.dual_update_steps ==0 :
-
-                    with torch.no_grad():
-                        # mu_dual = torch.nn.functional.relu(mu_dual + args.dual_step_mu * (F.cross_entropy(net(X_lab), y_lab) - args.epsilon))
-                        mu_dual = torch.clamp(mu_dual + args.dual_step_mu * (F.mse_loss(net(X_train), Y_train) - args.epsilon),0,5)
-                        f_all = net(X_total)  # Forward pass for all samples in the dataset
-
-                        numerator = torch.abs (f_all  - f_all.transpose(0,1)).to(device)
-                        division = torch.div(numerator, (adj_matrix + torch.eye(f_all.shape[0]).to(device)))
-                        [grads,indices] = torch.max(division, 1)
-                        lambda_dual = F.relu(lambda_dual + args.dual_step_mu*(grads))
-                        lambda_dual = lambda_dual/torch.sum(lambda_dual).item()
-
-                if (epoch+1) % args.print_steps ==0 :
-                    with torch.no_grad():
-                        acc = mse_metric(net,test_loader,device)
-                        loss_train = mse_metric(net,train_loader,device)
-                    utils.save_state(args.output_dir,epoch,loss_train,loss_train-loss_MSE,loss_MSE,acc)
-                
-                    print(f'Epoch loss{epoch,loss.item()}, mu={mu_dual.item()}, {loss.item()-loss_MSE}, loss train {loss_train}, loss test {acc}' )
-       
-
-    elif args.algorithm == 'MomentumGradient':
-
-            columns = ['Epoch', 'Loss CE','Regularized Laplacian Loss', 'Laplacian Loss', 'Accuracy']
-            utils.create_csv(args.output_dir, 'losses.csv', columns)
-            X_total = torch.concatenate((X_train, X_test), axis=0)
-            adj_matrix = laplacian.get_pairwise_distance_matrix(X_total, t=args.heat_kernel_t, distance_type='momentum_pendulum').to(device)
-
-            L = laplacian.get_laplacian(X_total, args.normalize, heat_kernel_t=args.heat_kernel_t, clamp_value = args.clamp, distance_type = 'momentum_pendulum').to(device)
-            e, V = np.linalg.eig(L.cpu().detach().numpy())
-            print('Connected Components', np.sum(e < 0.0001))
-            lambda_dual = torch.ones(len(X_total[:,0])) / len(X_total[:,0])  # Initialize dual variables for each sample in the dataset
-            lambda_dual = lambda_dual.to(device).detach().requires_grad_(False)
-            mu_dual = 5*torch.ones(1).to(device).detach().requires_grad_(False)
-            for epoch in range(args.epochs):
-                # print(epoch)
-                ############################################
-                # Primal Update
-                ############################################
-                for i, data in enumerate(train_loader):
-                    inputs, labels = data
-                    optimizer.zero_grad()
-                    f = net(inputs)
-                    f_all = net(X_total)
-
-                    loss = mu_dual * F.mse_loss(f, labels)
-                    loss_MSE = loss.item()
-                    loss += args.regularizer * torch.trace(torch.matmul(f_all.transpose(0,1),torch.matmul(L, f_all)))
-                    loss.backward()
-                    optimizer.step()
-                            # print(loss.item(),loss_MSE.item(),(loss-loss_MSE).item())
-                ############################################
-                # Dual Update
-                ############################################
-                if (epoch+1) % args.dual_update_steps ==0 :
-
-                    with torch.no_grad():
-                        # mu_dual = torch.nn.functional.relu(mu_dual + args.dual_step_mu * (F.cross_entropy(net(X_lab), y_lab) - args.epsilon))
-                        mu_dual = torch.clamp(mu_dual + args.dual_step_mu * (F.mse_loss(net(X_train), Y_train) - args.epsilon),0,5)
-                        f_all = net(X_total)  # Forward pass for all samples in the dataset
-
-                        numerator = torch.abs (f_all  - f_all.transpose(0,1)).to(device)
-                        division = torch.div(numerator, (adj_matrix + torch.eye(f_all.shape[0]).to(device)))
-                        [grads,indices] = torch.max(division, 1)
-                        lambda_dual = F.relu(lambda_dual + args.dual_step_mu*(grads))
-                        lambda_dual = lambda_dual/torch.sum(lambda_dual).item()
-
-                if (epoch+1) % args.print_steps ==0 :
-                    with torch.no_grad():
-                        acc = mse_metric(net,test_loader,device)
-                        loss_train = mse_metric(net,train_loader,device)
-                    utils.save_state(args.output_dir,epoch,loss_train,loss_train-loss_MSE,loss_MSE,acc)
-                
-                    print(f'Epoch loss{epoch,loss.item()}, mu={mu_dual.item()}, {loss.item()-loss_MSE}, loss train {loss_train}, loss test {acc}' )
-              
 
     elif args.algorithm == 'ManifoldGradientBatch':
 
@@ -553,16 +445,28 @@ def main(args):
                         # Following samples uniformly from the unlabeled dataset
                             # row_batch, col_batch, val_batch, x_row, x_col = next(unlabeled_loader_infinite)
                         # Sample indices based on the dual variable
-                        probs = lambda_dual.cpu().numpy()
-                        probs = probs / probs.sum()
-                        samples = np.random.choice(np.arange(dataset_size), size=args.bs, replace=False, p=probs)
-                        # print('Samples', samples)
-                        samples = torch.tensor(samples, dtype=torch.long, device=device)
-                        batch = [unlabeled_loader_finite.dataset[idx] for idx in samples]
-                        row_batch, col_batch, val_batch, x_row, x_col = collate_fn(batch)
                         
-                        val_batch = val_batch * lambda_dual[row_batch].to(device)  # Apply dual variable to the values
-                        loss += args.regularizer * laplacian_quad_batch_from_features(net, x_row, x_col, val_batch)
+                        probs = lambda_dual.cpu().numpy()
+                        if not np.isclose(probs.sum(), 0):
+                            non_zero_prob_indices = np.where(probs > 1e-9)[0]  # Using a small tolerance
+
+                            # Determine the number of non-zero probabilities
+                            num_non_zero_probs = len(non_zero_prob_indices)
+
+                            # Calculate the sampling size as the minimum of non-zero probabilities and args.bs
+                            sampling_size = min(num_non_zero_probs, args.bs)
+                            # print("Sum is approximately zero.")
+                        # else:
+                            # print(f"Sum is {probs.sum()}, not zero.")
+                            probs = probs / probs.sum()
+                            samples = np.random.choice(np.arange(dataset_size), size=sampling_size, replace=False, p=probs)
+                            # print('Samples', samples)
+                            samples = torch.tensor(samples, dtype=torch.long, device=device)
+                            batch = [unlabeled_loader_finite.dataset[idx] for idx in samples]
+                            row_batch, col_batch, val_batch, x_row, x_col = collate_fn(batch)
+                            
+                            val_batch = val_batch * lambda_dual[row_batch].to(device)  # Apply dual variable to the values
+                            loss += args.regularizer * laplacian_quad_batch_from_features(net, x_row, x_col, val_batch)
 
                         loss.backward()
                         optimizer.step()
@@ -574,31 +478,51 @@ def main(args):
 
                     with torch.no_grad():
                         for row_batch, col_batch, val_batch, x_row, x_col in unlabeled_loader_finite:
+
+                            device = next(net.parameters()).device  # Get the device of the model
+                            row_batch = row_batch.to(device)
+                            col_batch = col_batch.to(device)
+                            val_batch = val_batch.to(device)
+                            val_batch = torch.where(val_batch == 0, torch.tensor(1e-1, dtype=val_batch.dtype), val_batch)  # Avoid division by zero
+
+                            x_row = x_row.to(device)
+                            x_col = x_col.to(device)
+                            
                             fx_row = net(x_row)  # shape: (batch_size, feat_dim)
                             fx_col = net(x_col)  # shape: (batch_size, feat_dim)
                             numerator = torch.abs (fx_row  - fx_col).to(device).squeeze(1)  # (batch_size, feat_dim)
                             
-                            division = torch.div(numerator, val_batch)
+                            division = torch.div(numerator, val_batch).to(device)  # (batch_size, feat_dim)
                             # Find unique keys and mapping
                             unique_rows, inverse_indices = torch.unique(row_batch, return_inverse=True)
+                            unique_rows = unique_rows.to(device)  # Ensure it's on the same device
+                            inverse_indices = inverse_indices.to(device)  # Ensure it's on the same device
 
                             # Initialize a tensor to hold maximums
-                            max_values = torch.full((unique_rows.size(0),), float('-inf'))
+                            max_values = torch.full((unique_rows.size(0),), float('-inf')).to(device)
 
                             # Scatter maximum
                             max_values = max_values.scatter_reduce(0, inverse_indices, division, reduce="amax", include_self=True)
 
-                            lambda_dual[unique_rows] = F.relu(lambda_dual[unique_rows] + args.dual_step_mu*(max_values-args.lipschitz_constant))
+                            lambda_dual[unique_rows] = torch.clamp(
+                                                                    F.relu(lambda_dual[unique_rows] + args.dual_step * (max_values - args.lipschitz_constant)),
+                                                                    max=args.clamp_dual
+                                                                    )
+
+                    #
                     # TODO: Normalize lambda_dual
                 if (epoch+1) % args.print_steps ==0 :
                     with torch.no_grad():
                         acc = mse_metric(net,test_loader,device)
                         loss_train = mse_metric(net,train_loader,device)
                     utils.save_state(args.output_dir,epoch,loss_train,loss_train-loss_MSE,loss_MSE,acc)
-                
-                    print(f'Epoch loss{epoch,loss.item()},\
+                    lipschitz_constant = get_lipschitz_constant(net, unlabeled_loader_finite)  # Compute Lipschitz constant for logging
+
+                    print(f'Epoch loss{epoch},\
+                            loss {loss.item()},\
                             max lambda={torch.max(lambda_dual)}, \
                             positive lambdas={ (lambda_dual > 0).sum()}, \
+                            lipschitz constant={ lipschitz_constant }, \
                             loss train {loss_train}, \
                             loss grad {loss.item()-loss_MSE}, \
                             loss MSE {loss_MSE}, \
@@ -646,18 +570,16 @@ if __name__ == '__main__':
     parser.add_argument('--momentum', type=float, default=0.)
     parser.add_argument('--weight_decay', type=float, default=0.)
 
-    parser.add_argument('--dual_step_mu', type=float, default=0.5)
-    parser.add_argument('--dual_step_lambda', type=float, default=0.1)
-    parser.add_argument('--rho_step', type=float, default=0.1)
-    parser.add_argument('--epsilon', type=float, default=0.01)
+    parser.add_argument('--dual_step', type=float, default=0.5)
     parser.add_argument('--clamp', type=float, default=0.1)
+    parser.add_argument('--clamp_dual', type=float, default=1000.0, help='Clamp the dual variables to this value')
     parser.add_argument('--lipschitz_constant', type=float, default=1)
 
     parser.add_argument('--k', type=int, default=10)
 
     args = parser.parse_args()
 
-    args.output_dir = args.output_dir + '/' + str(args.dataset) +  '/' + args.algorithm+  '/'  + datetime.now().strftime("%Y-%m%d-%H%M%S")
+    args.output_dir = args.output_dir + '/' + str(args.dataset) +  '/' + args.algorithm+  '/'  + datetime.now().strftime("%Y-%m%d-%H%M%S-%f")
     os.makedirs(os.path.join(args.output_dir), exist_ok=True)
     
     # Create logs directory and save logs
