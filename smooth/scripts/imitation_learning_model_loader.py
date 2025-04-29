@@ -215,6 +215,20 @@ def main(args):
     print("Dataset loaded.")
     print(f"X_test shape: {X_test.shape}")
     print(f"Y_test shape: {Y_test.shape}")
+    
+    if X_unlab is not None:
+        X_total = torch.concatenate((X_train, X_unlab), axis=0)
+    else:
+        X_total = X_train
+    print('Ready to compute Laplacian of size', X_total.shape)
+    adj_matrix = laplacian.get_pairwise_distance_matrix(X_total, t=args.heat_kernel_t, distance_type='euclidean').to(device)
+        # L = laplacian.get_laplacian(X_total, args.normalize, heat_kernel_t=args.heat_kernel_t, clamp_value = args.clamp).to(device)
+    matrix = laplacian.get_knn_matrix(X_total,  distance_type = 'euclidean', matrix_type = 'knn', k=args.k, batch_size=200).to(device)
+
+    
+    dataset = NodeNeighborhoodDataset(matrix, X_total)
+    unlabeled_loader_finite = DataLoader(dataset, batch_size=args.bs//args.k, shuffle=True, collate_fn=collate_fn)
+    print('Completed Laplacian')
     # Create N
     # Suppose later you want to load the model
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -226,6 +240,9 @@ def main(args):
     with torch.no_grad():
         acc = mse_metric(model,test_loader,device)
         print(f'Test MSE: {acc:.4f}')
+        
+        lipschitz_constant = get_lipschitz_constant(model, unlabeled_loader_finite)  # Compute Lipschitz constant for logging
+        print(f'Lipschitz constant: {lipschitz_constant}')
 
 
 
@@ -235,7 +252,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--dataset', type=str, default='inverted_pendulum')
     parser.add_argument('--n_dim', type=int, default=2, help='Dimension')
-    parser.add_argument('--n_train', type=int, default=1)
+    parser.add_argument('--n_train', type=int, default=10)
     parser.add_argument('--n_unlab', type=int, default=0, help='Number of samples per class')
     parser.add_argument('--n_test', type=int, default=10)
     parser.add_argument('--output_dir', type=str, default='test')

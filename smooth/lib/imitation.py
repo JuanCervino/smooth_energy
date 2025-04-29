@@ -61,6 +61,9 @@ def create_imitation_dataset_trajectories(dataset, n_train, n_unlab, n_test, T):
     if len(ids_unlab) == 0:
         X_unlab = None
         y_unlab = None
+    else:
+        X_unlab = torch.tensor(data['obs'][ids_unlab, :], dtype=torch.float32).to(device)
+        y_unlab = torch.tensor(data['actions'][ids_unlab], dtype=torch.float32).to(device).unsqueeze(1)
     X_test = torch.tensor(data['obs'][ids_test, :], dtype=torch.float32).to(device)
     y_test = torch.tensor(data['actions'][ids_test], dtype=torch.float32).to(device).unsqueeze(1)
     return [X_lab, y_lab, X_unlab, y_unlab, X_test, y_test]
