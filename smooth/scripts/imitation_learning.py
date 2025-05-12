@@ -127,7 +127,8 @@ def get_lipschitz_constant(net, unlabeled_loader_finite):
             val_batch = val_batch.to(device)
             val_batch = torch.where(val_batch == 0, torch.tensor(1e-1, dtype=val_batch.dtype), val_batch)  # Avoid division by zero
 
-            numerator = torch.abs (fx_row  - fx_col).squeeze(1)  # (batch_size, feat_dim)
+            numerator = torch.abs (fx_row  - fx_col) # (batch_size, feat_dim)
+            numerator = numerator.sum(dim=1)
             division = torch.div(numerator, val_batch)
             # Find unique keys and mapping
             unique_rows, inverse_indices = torch.unique(row_batch, return_inverse=True)
@@ -264,6 +265,8 @@ def main(args):
     else:
         X_total = X_train
     print('Ready to compute Laplacian of size', X_total.shape)
+    print('Ready to compute Output of size', Y_train.shape)
+
     adj_matrix = laplacian.get_pairwise_distance_matrix(X_total, t=args.heat_kernel_t, distance_type='euclidean').to(device)
         # L = laplacian.get_laplacian(X_total, args.normalize, heat_kernel_t=args.heat_kernel_t, clamp_value = args.clamp).to(device)
     matrix = laplacian.get_knn_matrix(X_total,  distance_type = 'euclidean', matrix_type = 'knn', k=args.k, batch_size=200).to(device)
@@ -278,7 +281,9 @@ def main(args):
     print(f"X_test shape: {X_test.shape}")
     print(f"Y_test shape: {Y_test.shape}")
     # Create NN
-    net = FCNN3().to(device)
+    net = FCNN3(input_dim = X_train.shape[-1],
+                hidden_dim = args.hidden_neurons,
+                num_classes = Y_train.shape[-1]).to(device)
     print(f"Model architecture: {net}")
     print(f"Number of parameters in the model: {sum(p.numel() for p in net.parameters() if p.requires_grad)}")
         # Create the optimer
