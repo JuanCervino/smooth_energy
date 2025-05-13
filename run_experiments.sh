@@ -13,11 +13,6 @@ module load anaconda/Python-ML-2024b
 nvcc --version
 nvidia-smi
 
-# python -m smooth.scripts.imitation_learning --epochs 70000 --n_train 100 --n_test 1000 --bs 1000 --lr 0.1 --algorithm ERM
-# python -m smooth.scripts.imitation_learning --epochs 70000 --n_train 100 --n_test 1000 --bs 1000 --lr 0.1 --heat_kernel_t 0.09 --clamp 0.9  --algorithm LaplacianRegularizationEuclidean --regularizer 0.001
-# python -m smooth.scripts.imitation_learning --epochs 70000 --n_train 100 --n_test 1000 --bs 1000 --lr 0.1 --heat_kernel_t 0.1 --clamp 0.09  --algorithm LaplacianRegularizationMomentum --regularizer 0.00001
 
-# python -m smooth.scripts.imitation_learning --epochs 70000 --n_train 1000 --n_test 1000 --bs 1000 --lr 0.025 --heat_kernel_t 0.1 --clamp 0.09  --algorithm MomentumGradient --regularizer 0.00001 
-# python -m smooth.scripts.imitation_learning --epochs 70000 --n_train 100 --n_test 1000 --bs 1000 --lr 0.04 --heat_kernel_t 0.1 --clamp 0.09  --algorithm MomentumGradient --regularizer 0.00001 
-# python -m smooth.scripts.imitation_learning --epochs 70000 --n_train 1000 --n_test 1000 --bs 1000 --lr 0.02 --heat_kernel_t 0.09 --clamp 0.9  --algorithm ManifoldGradient --regularizer 0.00001
-# python -m smooth.scripts.imitation_learning --epochs 70000 --n_train 1000 --n_test 1000 --bs 1000 --lr 0.025 --heat_kernel_t 0.1 --clamp 0.09  --algorithm MomentumGradient --regularizer 0.00001 
+python -m smooth.scripts.imitation_learning --epochs 70000 --n_train 2 --n_test 2 --bs 128 --lr 0.025 --heat_kernel_t 0.1 --clamp 0.09  --algorithm ManifoldGradientBatch --regularizer 0.00001 --dataset halfcheetah
+# python -m smooth.scripts.imitation_learning --epochs 70000 --n_train 10 --n_test 1000 --bs 1000 --lr 0.025 --heat_kernel_t 0.1 --clamp 0.09  --algorithm ERM --regularizer 0.00001 --dataset halfcheetah

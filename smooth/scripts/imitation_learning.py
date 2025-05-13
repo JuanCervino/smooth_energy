@@ -495,8 +495,8 @@ def main(args):
                             
                             fx_row = net(x_row)  # shape: (batch_size, feat_dim)
                             fx_col = net(x_col)  # shape: (batch_size, feat_dim)
-                            numerator = torch.abs (fx_row  - fx_col).to(device).squeeze(1)  # (batch_size, feat_dim)
-                            
+                            numerator = torch.abs (fx_row  - fx_col).to(device)#.squeeze(1)  # (batch_size, feat_dim)
+                            numerator = numerator.sum(dim=1)
                             division = torch.div(numerator, val_batch).to(device)  # (batch_size, feat_dim)
                             # Find unique keys and mapping
                             unique_rows, inverse_indices = torch.unique(row_batch, return_inverse=True)

@@ -5,12 +5,14 @@
 
 
 
-datasets=("swimmer" "ant" "halfcheetah" "walker2d")
-# datasets=("halfcheetah")
+# datasets=("swimmer" "ant" "halfcheetah" "walker2d")
+datasets=("halfcheetah")
 
 n_trains=(2 4 6 8 10 12 14 16 18 20)  # Number of training samples
+# seeds=(20 30 40 50)
+
 seeds=(10)
-lip=250  
+lip=8 # Halfcheetah  
 clamp=1000
 dual_step=10
 algorithm="ERM"  # Algorithm to use
